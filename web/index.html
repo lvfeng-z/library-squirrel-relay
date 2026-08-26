@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LibrarySquirrel 分享</title>
+<style>
+  :root { --fg:#24292f; --muted:#57606a; --border:#d0d7de; --bg:#ffffff; --accent:#0969da; --danger:#cf222e; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; color:var(--fg); background:var(--bg); margin:0; }
+  .wrap { max-width: 640px; margin: 48px auto; padding: 0 20px; }
+  .card { border:1px solid var(--border); border-radius:12px; padding:28px 28px 20px; }
+  h1 { font-size:20px; margin:0 0 12px; word-break:break-all; }
+  .meta { color:var(--muted); font-size:14px; line-height:1.8; }
+  .status { margin:18px 0 8px; padding:10px 14px; border-radius:8px; font-size:14px; }
+  .status.active { background:#dafbe1; color:#116329; }
+  .status.revoked, .status.expired, .status.limited, .status.unknown { background:#ffebe9; color:#82071e; }
+  .btns { display:flex; gap:12px; flex-wrap:wrap; margin-top:8px; }
+  button { font:inherit; border-radius:8px; border:1px solid var(--border); padding:8px 18px; cursor:pointer; background:var(--bg); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--danger); }
+  #fallback { display:none; margin-top:10px; font-size:14px; }
+  footer { margin-top:26px; color:var(--muted); font-size:12px; line-height:1.7; border-top:1px solid var(--border); padding-top:14px; }
+  footer summary { cursor:pointer; font-weight:600; margin-top:8px; }
+  footer .legal { margin-top:6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>{{.Title}}</h1>
+    {{if .Found}}
+    <div class="meta">
+      {{.WorkCount}} 个作品 · 来源：{{.Source}}<br>
+      分享于 {{.CreatedAtText}}{{if .ExpiresAtText}} · 有效期至 {{.ExpiresAtText}}{{else}} · 长期有效{{end}}
+    </div>
+    {{end}}
+    {{if .Active}}
+    <div class="status active">分享有效——打开应用后即可拉取导入。拉取需要分享方保持在线。</div>
+    <div class="btns">
+      <button class="primary" onclick="openApp()">打开应用</button>
+      <button class="danger" onclick="reportShare()">举报</button>
+    </div>
+    <div id="fallback">未检测到应用？{{if .DownloadURL}}<a href="{{.DownloadURL}}" rel="noopener">前往下载 LibrarySquirrel</a>{{else}}请从官方渠道下载 LibrarySquirrel。{{end}}</div>
+    {{else}}
+    <div class="status {{.Status}}">{{.StatusText}}</div>
+    {{end}}
+    <footer id="disclaimer">
+      <div class="legal">本页面由 LibrarySquirrel 盲转中继提供服务：中继不存储、也无法读取分享内容（内容端到端加密，密钥不经中继）；页面仅展示分享方登记的文字元数据。溯源记录仅含会话标识、设备实例与来源信息。</div>
+      <details open>
+        <summary>服务条款与免责声明</summary>
+        <div class="legal">
+          1. 服务性质：本服务是点对点数据传输的「盲转中继」管道。中继仅在内存中即时转发分享方与收件人之间端到端加密的数据流，不在任何存储介质上保存分享内容；内容加密密钥仅存在于分享双方客户端，不经由中继——中继在技术上无法读取、也无法审查分享内容。<br>
+          2. 内容归属：分享内容由分享方自行提供并对内容负责。中继不选择、不编辑、不修改、不公开索引任何内容；本落地页仅展示分享方自愿登记的少量文字元数据（标题、作品数、来源、时间），不含任何图像。<br>
+          3. 侵权与违法内容处置：如本分享涉嫌侵犯著作权或包含违法信息，请使用本页「举报」入口——举报即时生效：该分享会话立即终止、链接立即失效、在途传输立即断开（举报即撤销）。收到有权机关依法要求时，运营方将依规配合处置并提供溯源记录。<br>
+          4. 免责边界：在法律允许的范围内，运营方不对以下事项承担责任：分享内容本身的合法性、准确性与完整性及其造成的损害；分享方离线等非中继原因导致的分享不可用；收件人获取内容后的使用行为。本声明不排除依据法律不得排除的法定责任。
+        </div>
+      </details>
+      <details>
+        <summary>隐私声明（溯源记录与留存）</summary>
+        <div class="legal">
+          为履行网络安全管理义务与处置滥用行为，本服务记录会话级溯源日志。记录字段为：事件类型、会话标识（token）、设备实例标识（instanceId）、来源 IP 地址、事件时间与处置说明——不含任何分享内容（中继无法读取内容，日志亦永不记录内容字节）。<br>
+          用途：仅用于滥用与违规行为的处置（撤销、封禁、限流）以及依法配合监管、执法与司法协查；不用于其他目的，不向无关第三方提供。<br>
+          留存期限：溯源日志按日切分文件留存，{{.RetentionDaysText}}，超期由系统自动删除。<br>
+          删除请求：如需查询或删除您的相关记录，请联系 relay-privacy@example.com（占位——正式运营前替换为实际联系方式）；依法须留存的日志在法定留存期内不予删除。
+        </div>
+      </details>
+      <details>
+        <summary>举报与处置流程</summary>
+        <div class="legal">
+          点击本页「举报」按钮并确认后，该分享会话被立即撤销（举报即撤销）：链接即刻失效、在途传输即刻断开，分享方须重新发布才能恢复分享。同一设备实例名下的分享累计被举报达到设定阈值后，该实例将被自动封禁、无法再注册新分享；运营方亦可根据处置需要按 IP 封禁。涉未成年人等严重违法内容，请同时向属地公安机关举报，本服务将依法配合调查。
+        </div>
+      </details>
+      <details>
+        <summary>源码获取（AGPL-3.0）</summary>
+        <div class="legal">
+          本中继服务以 GNU AGPL-3.0 许可发布。依据其第 13 条（远程网络交互），您通过网络使用本服务期间可获取对应完整源码：
+          <!-- 占位链接：正式运营前替换为本实例实际源码仓库地址 -->
+          <a href="https://github.com/lvfeng-z/library-squirrel-relay" rel="noopener">https://github.com/lvfeng-z/library-squirrel-relay</a>
+        </div>
+      </details>
+    </footer>
+  </div>
+</div>
+<script>
+function openApp(){
+  location.href = {{.DeepLink}};
+  setTimeout(function(){ document.getElementById('fallback').style.display='block'; }, 2000);
+}
+function reportShare(){
+  if(!confirm('确认举报该分享？举报后会话将立即终止。')) return;
+  fetch({{.ReportURL}}, {method:'POST'}).then(function(){ location.reload(); }).catch(function(){ location.reload(); });
+}
+</script>
+</body>
+</html>
