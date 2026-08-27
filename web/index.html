@@ -84,7 +84,8 @@
 </div>
 <script>
 function openApp(){
-  location.href = {{.DeepLink}};
+  // 深链需拼接页面 hash：#k= E2E 密钥经 URL fragment 分发（形态①），只跳 DeepLink 会把密钥丢在落地页
+  location.href = {{.DeepLink}} + location.hash;
   setTimeout(function(){ document.getElementById('fallback').style.display='block'; }, 2000);
 }
 function reportShare(){
