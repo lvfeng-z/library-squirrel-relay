@@ -83,6 +83,14 @@ func TestMalformedFramesRejected(t *testing.T) {
 			[]byte(`{"role":"recipient","key":"topsecret","instanceId":"instance-recipient-01"}`)...), "malformed"},
 		{"HELLO 非法 instanceId", rawFrameBytes(frameHello, 0, 33, []byte(`{"role":"recipient","instanceId":"x"}`)), "malformed"},
 		{"HELLO 超长载荷", rawFrameBytes(frameHello, 0, 8192, make([]byte, 8192)), "malformed"},
+		{"HELLO 作品名含控制字符", func() []byte {
+			b := []byte(`{"role":"sharer","action":"register","instanceId":"instance-sharer-0001","meta":{"title":"t","workCount":1,"source":"s","worksName":["作品\n1"]}}`)
+			return rawFrameBytes(frameHello, 0, uint32(len(b)), b)
+		}(), "malformed"},
+		{"HELLO 作品名单名超长", func() []byte {
+			b := []byte(`{"role":"sharer","action":"register","instanceId":"instance-sharer-0001","meta":{"title":"t","workCount":1,"source":"s","worksName":["` + strings.Repeat("名", maxWorksNameLen+1) + `"]}}`)
+			return rawFrameBytes(frameHello, 0, uint32(len(b)), b)
+		}(), "malformed"},
 	}
 
 	for _, tc := range cases {

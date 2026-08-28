@@ -74,8 +74,26 @@ func validateShareMeta(m *shareMeta) error {
 	if hasControlChars(m.Title) || hasControlChars(m.Source) {
 		return fmt.Errorf("元数据含控制字符")
 	}
+	if len(m.WorksName) > maxWorksNameCount {
+		return fmt.Errorf("作品名列表过长（上限 %d 条）", maxWorksNameCount)
+	}
+	for _, n := range m.WorksName {
+		if runeLenOf(n) > maxWorksNameLen {
+			return fmt.Errorf("作品名过长（上限 %d 字符）", maxWorksNameLen)
+		}
+		if hasControlChars(n) {
+			return fmt.Errorf("作品名含控制字符")
+		}
+	}
 	return nil
 }
+
+// 作品名列表上限：单名与标题同限（200 rune），条数上限防御极端载荷
+// （实际条数还受 HELLO 帧 maxHelloBytes 约束，见 PROTOCOL.md §3）
+const (
+	maxWorksNameLen   = 200
+	maxWorksNameCount = 1000
+)
 
 func runeLenOf(s string) int {
 	n := 0

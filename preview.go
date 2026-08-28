@@ -49,6 +49,7 @@ type pageData struct {
 	Found             bool // 会话是否存在（不存在时不渲染元数据区）
 	WorkCount         int64
 	Source            string
+	WorksName         []string // 各作品名（有序；无作品名时 nil，模板跳过列表区）
 	CreatedAtText     string
 	ExpiresAtText     string // 空 = 长期有效
 	Active            bool
@@ -135,6 +136,7 @@ func (r *Relay) serveLanding(w http.ResponseWriter, req *http.Request) {
 			Found:             true,
 			WorkCount:         s.Meta.WorkCount,
 			Source:            s.Meta.Source,
+			WorksName:         s.Meta.WorksName,
 			CreatedAtText:     formatMills(s.CreatedAt),
 			Active:            status == "active",
 			Status:            status,

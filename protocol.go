@@ -147,9 +147,10 @@ type helloPayload struct {
 
 // shareMeta 落地页文字元数据（预览最小化：仅文字，无任何图像）
 type shareMeta struct {
-	Title     string `json:"title"`
-	WorkCount int64  `json:"workCount"`
-	Source    string `json:"source"`
+	Title     string   `json:"title"`
+	WorkCount int64    `json:"workCount"`
+	Source    string   `json:"source"`
+	WorksName []string `json:"worksName,omitempty"` // 各作品名明文（register 上传，bind 复原不携带）；顺序对齐分享清单
 }
 
 // decodeHello 严格解析 HELLO 载荷：未知字段或尾随多余内容一律拒绝

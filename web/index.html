@@ -12,6 +12,10 @@
   .card { border:1px solid var(--border); border-radius:12px; padding:28px 28px 20px; }
   h1 { font-size:20px; margin:0 0 12px; word-break:break-all; }
   .meta { color:var(--muted); font-size:14px; line-height:1.8; }
+  .works { margin-top:16px; border-top:1px solid var(--border); padding-top:12px; }
+  .works-title { color:var(--fg); font-size:13px; font-weight:600; margin-bottom:6px; }
+  .works-list { margin:0; padding-left:20px; }
+  .work-item { color:var(--muted); font-size:14px; line-height:1.9; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .status { margin:18px 0 8px; padding:10px 14px; border-radius:8px; font-size:14px; }
   .status.active { background:#dafbe1; color:#116329; }
   .status.revoked, .status.expired, .status.limited, .status.unknown { background:#ffebe9; color:#82071e; }
@@ -34,6 +38,14 @@
       {{.WorkCount}} 个作品 · 来源：{{.Source}}<br>
       分享于 {{.CreatedAtText}}{{if .ExpiresAtText}} · 有效期至 {{.ExpiresAtText}}{{else}} · 长期有效{{end}}
     </div>
+    {{if .WorksName}}
+    <div class="works">
+      <div class="works-title">作品列表</div>
+      <ol class="works-list">
+        {{range .WorksName}}<li class="work-item">{{.}}</li>{{end}}
+      </ol>
+    </div>
+    {{end}}
     {{end}}
     {{if .Active}}
     <div class="status active">分享有效——打开应用后即可拉取导入。拉取需要分享方保持在线。</div>
