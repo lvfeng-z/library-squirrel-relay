@@ -1,7 +1,8 @@
 bin/
 *.exe
-state.json
-state.json.tmp
-state.json.corrupt-*
+state*.json
+state*.json.tmp
+state*.json.corrupt-*
 log/
 config.local.json
+.idea

@@ -1,0 +1,20 @@
+{
+  "listenAddr": "127.0.0.1:9527",
+  "publicAddr": "127.0.0.1:9527",
+  "downloadUrl": "",
+  "adminToken": "",
+  "logLevel": "debug",
+  "stateFile": "state-local.json",
+  "traceDir": "log/trace-local",
+  "defaultExpireSeconds": 604800,
+  "maxExpireSeconds": 604800,
+  "registerPerIPPerHour": 100,
+  "registerGlobalPerHour": 1000,
+  "dialPerIPPerMinute": 100,
+  "reportPerIPPerHour": 100,
+  "maxSessions": 100,
+  "maxStreamsPerSession": 8,
+  "maxGlobalStreams": 100,
+  "maxSessionTrafficBytes": 0,
+  "maxConns": 100
+}
