@@ -4,10 +4,12 @@ package main
 // 限流（会话风暴/拨号）、流量上限、并发流上限、状态持久化、溯源日志、中继无解密能力。
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -375,6 +377,89 @@ func TestStatePersistenceAcrossRestart(t *testing.T) {
 	if _, _, err := recipientRoundTrip(B, key, []byte("after-restart")); err != nil {
 		t.Fatalf("重启重绑后往返失败: %v", err)
 	}
+}
+
+// TestLoadStateWarnsOnSuspectedStateLoss 状态丢失疑似告警：溯源目录留有活动痕迹而无会话
+// 加载（状态文件缺失/零会话）时告警；正常加载与全新部署不告警
+func TestLoadStateWarnsOnSuspectedStateLoss(t *testing.T) {
+	captureWarn := func(t *testing.T) *bytes.Buffer {
+		t.Helper()
+		buf := &bytes.Buffer{}
+		old := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+		t.Cleanup(func() { slog.SetDefault(old) })
+		return buf
+	}
+	seedTrace := func(t *testing.T, traceDir string) {
+		t.Helper()
+		if err := os.MkdirAll(traceDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(traceDir, "trace-20261002.jsonl"), []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loadRelay := func(t *testing.T, stateFile, traceDir string) {
+		t.Helper()
+		cfg := defaultConfig()
+		cfg.StateFile = stateFile
+		cfg.TraceDir = traceDir
+		cfg.sanitize()
+		r := newRelay(cfg, newTraceLog(traceDir, cfg.TraceRetentionDays))
+		if err := r.loadState(); err != nil {
+			t.Fatalf("状态恢复失败: %v", err)
+		}
+	}
+
+	t.Run("状态文件缺失且溯源目录有活动", func(t *testing.T) {
+		dir := t.TempDir()
+		traceDir := filepath.Join(dir, "log")
+		seedTrace(t, traceDir)
+		buf := captureWarn(t)
+		loadRelay(t, filepath.Join(dir, "missing-state.json"), traceDir)
+		if !strings.Contains(buf.String(), "疑似状态丢失") {
+			t.Fatalf("状态文件缺失且溯源有活动应告警: %q", buf.String())
+		}
+	})
+	t.Run("状态文件零会话且溯源目录有活动", func(t *testing.T) {
+		dir := t.TempDir()
+		traceDir := filepath.Join(dir, "log")
+		seedTrace(t, traceDir)
+		stateFile := filepath.Join(dir, "state.json")
+		data, _ := json.Marshal(relayState{Version: 1})
+		if err := os.WriteFile(stateFile, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		buf := captureWarn(t)
+		loadRelay(t, stateFile, traceDir)
+		if !strings.Contains(buf.String(), "疑似状态丢失") {
+			t.Fatalf("零会话加载且溯源有活动应告警: %q", buf.String())
+		}
+	})
+	t.Run("有会话加载不告警", func(t *testing.T) {
+		dir := t.TempDir()
+		traceDir := filepath.Join(dir, "log")
+		seedTrace(t, traceDir)
+		stateFile := filepath.Join(dir, "state.json")
+		st := relayState{Version: 1, Sessions: []*Session{{Token: "abcdefghijklmnopqrstuv", Status: SessionActive}}}
+		data, _ := json.Marshal(st)
+		if err := os.WriteFile(stateFile, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		buf := captureWarn(t)
+		loadRelay(t, stateFile, traceDir)
+		if strings.Contains(buf.String(), "疑似状态丢失") {
+			t.Fatalf("有会话加载不应告警: %q", buf.String())
+		}
+	})
+	t.Run("全新部署不告警", func(t *testing.T) {
+		dir := t.TempDir()
+		buf := captureWarn(t)
+		loadRelay(t, filepath.Join(dir, "state.json"), filepath.Join(dir, "log"))
+		if strings.Contains(buf.String(), "疑似状态丢失") {
+			t.Fatalf("全新部署（无溯源目录）不应告警: %q", buf.String())
+		}
+	})
 }
 
 // TestTraceLogRecordsFactsNotContent 溯源日志：记录 token/实例/IP/时间，不记内容

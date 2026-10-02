@@ -159,6 +159,7 @@ func (r *Relay) loadState() error {
 	data, err := os.ReadFile(r.cfg.StateFile)
 	if err != nil {
 		if os.IsNotExist(err) {
+			r.warnStateLossSuspected()
 			return nil
 		}
 		return err
@@ -172,7 +173,6 @@ func (r *Relay) loadState() error {
 		return nil
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.sessions = map[string]*Session{}
 	for _, s := range st.Sessions {
 		if s == nil || !validTokenFormat(s.Token) {
@@ -184,6 +184,7 @@ func (r *Relay) loadState() error {
 		s.ensureRT()
 		r.sessions[s.Token] = s
 	}
+	loaded := len(r.sessions)
 	if st.Bans.Instances == nil {
 		st.Bans.Instances = map[string]int64{}
 	}
@@ -191,7 +192,33 @@ func (r *Relay) loadState() error {
 		st.Bans.IPs = map[string]int64{}
 	}
 	r.bans = st.Bans
+	r.mu.Unlock()
+	if loaded == 0 {
+		r.warnStateLossSuspected()
+	}
 	return nil
+}
+
+// warnStateLossSuspected 无会话加载且溯源目录留有活动痕迹时打运维告警：会话与封禁状态
+// 全量持久化（终态记录不删除），运行过的中继重启后应带有历史会话；空状态 + 非空溯源目录
+// 通常意味着 stateFile 配置指错或状态文件被移动——此窗口内 bind 会被答 not_found，
+// 分享方可能据此判死。仅告警，不阻断启动。
+func (r *Relay) warnStateLossSuspected() {
+	if !traceDirHasActivity(r.cfg.TraceDir) {
+		return
+	}
+	slog.Warn("状态文件无会话但溯源目录留有活动痕迹，疑似状态丢失（核对 stateFile 配置与文件是否被移动）",
+		"stateFile", r.cfg.StateFile, "traceDir", r.cfg.TraceDir)
+}
+
+// traceDirHasActivity 溯源目录是否留有活动痕迹（目录存在且含任意条目）；目录缺失或
+// 不可读视为无（全新部署不告警）
+func traceDirHasActivity(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	return len(entries) > 0
 }
 
 // saveStateLocked 原子落盘当前状态（临时文件 + rename；须持 r.mu 调用）
