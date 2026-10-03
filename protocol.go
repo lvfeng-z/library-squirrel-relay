@@ -140,7 +140,7 @@ type helloPayload struct {
 	Token          string     `json:"token,omitempty"`          // bind 与 recipient 拨号必填
 	InstanceID     string     `json:"instanceId"`               // 设备绑定实例 ID（客户端自报，溯源用）
 	PasswordHash   string     `json:"passwordHash,omitempty"`   // hex(sha256(访问密码))，可选；明文密码永不在线路上出现
-	ExpireSeconds  *int64     `json:"expireSeconds,omitempty"`  // 仅 register：nil=用中继默认；0=无限期；>0=自定义秒数
+	ExpireSeconds  *int64     `json:"expireSeconds,omitempty"`  // 仅 register：nil=用中继默认；0=已停用（返回 invalid_expire）；>0=自定义秒数
 	Meta           *shareMeta `json:"meta,omitempty"`           // 仅 register：落地页文字元数据
 	CandidateAddrs []string   `json:"candidateAddrs,omitempty"` // 仅 register：V2 直连候选地址（预留位，本期仅存储不消费）
 }
@@ -170,7 +170,7 @@ func decodeHello(b []byte) (helloPayload, error) {
 // welcomePayload WELCOME 载荷
 type welcomePayload struct {
 	Token     string `json:"token,omitempty"` // register 应答：新生成的分享 token
-	ExpiresAt int64  `json:"expiresAt"`       // 会话到期时刻（unix 毫秒，0=无限期）
+	ExpiresAt int64  `json:"expiresAt"`       // 会话到期时刻（unix 毫秒；0 仅遗留状态文件存量无限期会话，新注册不再产生）
 }
 
 // resultPayload RESULT 载荷（控制操作应答）

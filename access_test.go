@@ -141,11 +141,37 @@ func TestExpiryKillSwitch(t *testing.T) {
 	if _, code := dialRecipient(t, h.addr, A.token, "instance-recipient-01", ""); code != "expired" {
 		t.Fatalf("过期后拨号应被拒（expired），得到 %q", code)
 	}
-	// 无限期会话（expireSeconds=0）不受影响
+	// expireSeconds=0（原「无限期」）已停用：注册即拒（invalid_expire），会话不建立
 	zero := int64(0)
-	A2 := startSharer(t, h.addr, regOpts{expireSeconds: &zero})
-	if _, code := dialRecipient(t, h.addr, A2.token, "instance-recipient-01", ""); code != "" {
-		t.Fatalf("无限期会话拨号被拒: %s", code)
+	conn := rawDial(t, h.addr)
+	_ = writeTestFrame(conn, frameHello, 0, mustJSON(helloPayload{
+		Role: "sharer", Action: "register", InstanceID: "instance-sharer-0002",
+		ExpireSeconds: &zero, Meta: defaultTestMeta(),
+	}))
+	zfr, zerr := readTestFrame(conn, 5*time.Second)
+	_ = conn.Close()
+	if zerr != nil || zfr.Type != frameError {
+		t.Fatalf("expireSeconds=0 注册应被拒，得到 frame=%+v err=%v", zfr, zerr)
+	}
+	var zwe wireErr
+	_ = json.Unmarshal(zfr.Payload, &zwe)
+	if zwe.Code != "invalid_expire" {
+		t.Fatalf("expireSeconds=0 注册拒绝码 %q，预期 invalid_expire", zwe.Code)
+	}
+	if !strings.Contains(zwe.Message, "无限期") {
+		t.Fatalf("拒绝文案应说明无限期已停用: %q", zwe.Message)
+	}
+	// 会话不建立：在册会话中不得出现该实例的任何行（含终态行）
+	h.relay.mu.Lock()
+	leaked := 0
+	for _, s := range h.relay.sessions {
+		if s.InstanceID == "instance-sharer-0002" {
+			leaked++
+		}
+	}
+	h.relay.mu.Unlock()
+	if leaked != 0 {
+		t.Fatalf("被拒注册不应建立会话（发现在册行 %d 条）", leaked)
 	}
 }
 
@@ -542,4 +568,217 @@ func TestConcurrentRegistersAndDials(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// TestSweepPrunesTerminalRows 终态剪枝四态：超 30 天保留期的终态行被剪枝且状态文件同轮更新；
+// 30 天内的终态行、未盖终态时刻的终态行（生产路径不产生，仅守卫）与活跃行不剪
+func TestSweepPrunesTerminalRows(t *testing.T) {
+	h := startRelay(t, nil)
+	r := h.relay
+	now := time.Now()
+
+	seedRow := func(tag, status string, endedAt int64) string {
+		t.Helper()
+		tok, err := newToken()
+		if err != nil {
+			t.Fatalf("生成 token 失败: %v", err)
+		}
+		s := &Session{
+			Token: tok, InstanceID: "instance-prune-" + tag, RegIP: "127.0.0.1",
+			CreatedAt: now.Add(-40 * 24 * time.Hour).UnixMilli(),
+			Status:    status, EndedAt: endedAt,
+		}
+		s.ensureRT()
+		r.mu.Lock()
+		r.sessions[tok] = s
+		r.mu.Unlock()
+		return tok
+	}
+	oldRevoked := seedRow("old", SessionRevoked, now.Add(-31*24*time.Hour).UnixMilli()) // 超保留期 → 剪
+	oldExpired := seedRow("oldexp", SessionExpired, now.Add(-31*24*time.Hour).UnixMilli())
+	fresh := seedRow("fresh", SessionRevoked, now.Add(-29*24*time.Hour).UnixMilli()) // 保留期内 → 留
+	noStamp := seedRow("nostamp", SessionRevoked, 0)                                 // 未盖终态时刻 → 留
+	active := seedRow("act", SessionActive, 0)                                       // 活跃 → 永不剪
+
+	r.sweepOnce(now)
+
+	r.mu.Lock()
+	_, gotOldRevoked := r.sessions[oldRevoked]
+	_, gotOldExpired := r.sessions[oldExpired]
+	_, gotFresh := r.sessions[fresh]
+	_, gotNoStamp := r.sessions[noStamp]
+	_, gotActive := r.sessions[active]
+	r.mu.Unlock()
+	if gotOldRevoked || gotOldExpired {
+		t.Fatalf("超保留期终态行应被剪枝: revoked=%v expired=%v", gotOldRevoked, gotOldExpired)
+	}
+	if !gotFresh || !gotNoStamp {
+		t.Fatalf("保留期内与未盖终态时刻的终态行不应被剪枝: fresh=%v noStamp=%v", gotFresh, gotNoStamp)
+	}
+	if !gotActive {
+		t.Fatal("活跃行永不剪枝")
+	}
+
+	// 状态文件同轮更新：被剪 token 移出落盘快照，保留行仍在，版本维持 1
+	data, err := os.ReadFile(h.cfg.StateFile)
+	if err != nil {
+		t.Fatalf("读取状态文件失败: %v", err)
+	}
+	var st relayState
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatalf("状态文件非 JSON: %v", err)
+	}
+	if st.Version != 1 {
+		t.Fatalf("状态文件版本应维持 1: %d", st.Version)
+	}
+	onDisk := map[string]bool{}
+	for _, s := range st.Sessions {
+		onDisk[s.Token] = true
+	}
+	if onDisk[oldRevoked] || onDisk[oldExpired] {
+		t.Fatal("被剪枝的 token 不应留在状态文件")
+	}
+	if !onDisk[fresh] || !onDisk[noStamp] || !onDisk[active] {
+		t.Fatal("保留行应留在状态文件")
+	}
+}
+
+// TestAdminBanStampsEndedAt 管理端封禁批量持锁直接置 revoked（绕开 killSession），
+// 按 instanceId 与按 IP 两路的级联撤销均盖终态时刻（剪枝计时的起点）
+func TestAdminBanStampsEndedAt(t *testing.T) {
+	const adminToken = "test-admin-token"
+	h := startRelay(t, func(c *Config) { c.AdminToken = adminToken })
+	A := startSharer(t, h.addr, regOpts{instanceID: "instance-banstamp-01"})
+	B := startSharer(t, h.addr, regOpts{instanceID: "instance-banstamp-02"})
+	before := time.Now().UnixMilli()
+
+	if code, body := httpPostJSON(t, "http://"+h.addr+"/admin/ban", adminToken, map[string]string{"instanceId": "instance-banstamp-01"}); code != 200 {
+		t.Fatalf("按实例封禁失败: %d %s", code, body)
+	}
+	if code, body := httpPostJSON(t, "http://"+h.addr+"/admin/ban", adminToken, map[string]string{"ip": "127.0.0.1"}); code != 200 {
+		t.Fatalf("按 IP 封禁失败: %d %s", code, body)
+	}
+
+	h.relay.mu.Lock()
+	sa, sb := h.relay.sessions[A.token], h.relay.sessions[B.token]
+	var endedA, endedB int64
+	var statusA, statusB string
+	if sa != nil {
+		endedA, statusA = sa.EndedAt, sa.Status
+	}
+	if sb != nil {
+		endedB, statusB = sb.EndedAt, sb.Status
+	}
+	h.relay.mu.Unlock()
+	if statusA != SessionRevoked || endedA == 0 || endedA < before {
+		t.Fatalf("按实例封禁的会话应置 revoked 且盖终态时刻: status=%q endedAt=%d", statusA, endedA)
+	}
+	if statusB != SessionRevoked || endedB == 0 || endedB < before {
+		t.Fatalf("按 IP 封禁的会话应置 revoked 且盖终态时刻: status=%q endedAt=%d", statusB, endedB)
+	}
+}
+
+// TestLoadStateBackfillsEndedAt 旧格式状态文件（终态行无 endedAt）：加载时补记当前时刻
+// （自此宽限一个保留期后可剪枝）并即时落盘；活跃行与已有终态时刻的行不动
+func TestLoadStateBackfillsEndedAt(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "state.json")
+	traceDir := filepath.Join(dir, "log")
+	const (
+		tokRevoked = "abcdefghijklmnopqrstuv" // 终态缺 endedAt → 补
+		tokActive  = "0123456789012345678901" // 活跃 → 不动
+		tokStamped = "ABCDEFGHIJKLMNOPQRSTUV" // 已有终态时刻 → 不动
+	)
+	before := time.Now().UnixMilli()
+	st := relayState{Version: 1, Sessions: []*Session{
+		{Token: tokRevoked, Status: SessionRevoked, CreatedAt: before - 1},
+		{Token: tokActive, Status: SessionActive, CreatedAt: before - 1},
+		{Token: tokStamped, Status: SessionExpired, CreatedAt: before - 1, EndedAt: 42},
+	}}
+	data, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateFile, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := defaultConfig()
+	cfg.StateFile = stateFile
+	cfg.TraceDir = traceDir
+	cfg.sanitize()
+	r := newRelay(cfg, newTraceLog(traceDir, cfg.TraceRetentionDays))
+	if err := r.loadState(); err != nil {
+		t.Fatalf("状态恢复失败: %v", err)
+	}
+	r.mu.Lock()
+	endedRevoked := r.sessions[tokRevoked].EndedAt
+	endedActive := r.sessions[tokActive].EndedAt
+	endedStamped := r.sessions[tokStamped].EndedAt
+	r.mu.Unlock()
+	after := time.Now().UnixMilli()
+	if endedRevoked < before || endedRevoked > after {
+		t.Fatalf("终态行缺 endedAt 应补记加载时刻 [%d,%d]: %d", before, after, endedRevoked)
+	}
+	if endedActive != 0 {
+		t.Fatalf("活跃行不应被盖终态时刻: %d", endedActive)
+	}
+	if endedStamped != 42 {
+		t.Fatalf("已有终态时刻不应被改写: %d", endedStamped)
+	}
+
+	// 补值已落盘（频繁重启不重置宽限钟），且版本维持 1（向后兼容）
+	data2, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st2 relayState
+	if err := json.Unmarshal(data2, &st2); err != nil {
+		t.Fatalf("状态文件非 JSON: %v", err)
+	}
+	if st2.Version != 1 {
+		t.Fatalf("状态文件版本应维持 1: %d", st2.Version)
+	}
+	saved := false
+	for _, s := range st2.Sessions {
+		if s.Token == tokRevoked {
+			saved = s.EndedAt == endedRevoked
+		}
+	}
+	if !saved {
+		t.Fatalf("补记的 endedAt 应已落盘: %d", endedRevoked)
+	}
+}
+
+// TestConfigRejectsNonPositiveDefaultExpire 配置逃生口收口：defaultExpireSeconds 非正属显式误配
+// （nil 注册将产生不到期会话），加载即报错拒绝启动；正数显式配置与缺省默认不受影响
+func TestConfigRejectsNonPositiveDefaultExpire(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg := func(content string) string {
+		t.Helper()
+		p := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, bad := range []string{
+		`{"defaultExpireSeconds": 0}`,
+		`{"defaultExpireSeconds": -5}`,
+		`{"listenAddr": ":1", "defaultExpireSeconds": 0}`,
+	} {
+		_, err := loadConfig(writeCfg(bad))
+		if err == nil {
+			t.Fatalf("配置 %s 应拒绝启动", bad)
+		}
+		if !strings.Contains(err.Error(), "defaultExpireSeconds") || !strings.Contains(err.Error(), "无限期") {
+			t.Fatalf("报错应说明 defaultExpireSeconds 须为正数（无限期已停用）: %v", err)
+		}
+	}
+	if _, err := loadConfig(writeCfg(`{"defaultExpireSeconds": 3600}`)); err != nil {
+		t.Fatalf("正数配置不应报错: %v", err)
+	}
+	if _, err := loadConfig(filepath.Join(dir, "missing.json")); err != nil {
+		t.Fatalf("配置文件缺失应取默认值启动: %v", err)
+	}
 }

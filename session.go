@@ -27,7 +27,8 @@ type Session struct {
 	RegIP          string     `json:"regIp"`                    // 注册来源 IP（处置面：按 IP 精准封禁）
 	PasswordHash   string     `json:"passwordHash,omitempty"`   // 可选访问密码的 sha256 hex（空=无密码）
 	CreatedAt      int64      `json:"createdAt"`                // 注册时刻 unix 毫秒
-	ExpiresAt      int64      `json:"expiresAt"`                // 到期时刻 unix 毫秒（0=无限期）
+	ExpiresAt      int64      `json:"expiresAt"`                // 到期时刻 unix 毫秒（0 仅遗留状态文件存量无限期会话，新注册不再产生）
+	EndedAt        int64      `json:"endedAt,omitempty"`        // 终态时刻 unix 毫秒（0=未终态；终态行剪枝保留期的计时起点）
 	Status         string     `json:"status"`                   // active / revoked / expired
 	Meta           shareMeta  `json:"meta"`                     // 落地页文字元数据
 	CandidateAddrs []string   `json:"candidateAddrs,omitempty"` // V2 直连候选地址（预留位，本期仅存储不消费）
@@ -55,6 +56,28 @@ func (s *Session) ensureRT() *sessionRT {
 // expired 会话是否已到有效期终点（ExpiresAt=0 表示无限期）
 func (s *Session) expired(now time.Time) bool {
 	return s.ExpiresAt > 0 && now.UnixMilli() >= s.ExpiresAt
+}
+
+// sessionRetention 终态行剪枝保留期：终态时刻起 30 天内保留供撤销/过期语义与溯源，
+// 超期后由定时扫描（sweepOnce）从注册表与状态文件中删除
+const sessionRetention = 30 * 24 * time.Hour
+
+// markEnded 把活跃会话置为指定终态并盖终态时刻 EndedAt（全部终态写入点的唯一收敛入口）。
+// 幂等：终态不可逆，已终态的行不重盖（以首个终态时刻为准）；目标为 active 的调用不盖
+// ——限流处置借用 killSession 拆隧道但会话保持活跃，非终态转换。
+func (s *Session) markEnded(status string, now time.Time) {
+	if status == SessionActive || s.Status != SessionActive {
+		return
+	}
+	s.Status = status
+	s.EndedAt = now.UnixMilli()
+}
+
+// prunable 终态行是否已超剪枝保留期（活跃行与未盖终态时刻的行永不剪；
+// 后者仅存在于旧格式状态文件，加载时即补值，见 loadState）
+func (s *Session) prunable(now time.Time) bool {
+	return s.Status != SessionActive && s.EndedAt > 0 &&
+		now.Sub(time.UnixMilli(s.EndedAt)) > sessionRetention
 }
 
 // validateShareMeta 校验落地页文字元数据（长度与控制字符，防注入/防滥用承载）
@@ -125,7 +148,8 @@ func validateCandidateAddrs(addrs []string) error {
 	return nil
 }
 
-// resolveExpireMS 解析注册有效期：nil=用中继默认；0=无限期；>0=自定义秒数（超上限截断到上限）
+// resolveExpireMS 解析注册有效期：nil=用中继默认；>0=自定义秒数（超上限截断到上限）；
+// 0=非法（曾表示无限期，已停用），负数非法——二者均报错拒绝注册
 func resolveExpireMS(in *int64, cfg Config, now time.Time) (int64, error) {
 	if in == nil {
 		if cfg.DefaultExpireSeconds <= 0 {
@@ -137,7 +161,7 @@ func resolveExpireMS(in *int64, cfg Config, now time.Time) (int64, error) {
 		return 0, fmt.Errorf("expireSeconds 不能为负")
 	}
 	if *in == 0 {
-		return 0, nil
+		return 0, fmt.Errorf("expireSeconds 无限期已停用，请指定有效期")
 	}
 	secs := *in
 	if cfg.MaxExpireSeconds > 0 && secs > cfg.MaxExpireSeconds {
@@ -174,12 +198,20 @@ func (r *Relay) loadState() error {
 	}
 	r.mu.Lock()
 	r.sessions = map[string]*Session{}
+	now := time.Now()
+	backfilled := 0
 	for _, s := range st.Sessions {
 		if s == nil || !validTokenFormat(s.Token) {
 			continue
 		}
 		if s.Status == "" {
 			s.Status = SessionActive
+		}
+		// 旧格式终态行（无 endedAt）补记加载时刻：自此宽限一个保留期后可被剪枝；
+		// 活跃行不盖。补值即时落盘，避免频繁重启反复重置宽限钟。
+		if s.Status != SessionActive && s.EndedAt == 0 {
+			s.EndedAt = now.UnixMilli()
+			backfilled++
 		}
 		s.ensureRT()
 		r.sessions[s.Token] = s
@@ -192,6 +224,9 @@ func (r *Relay) loadState() error {
 		st.Bans.IPs = map[string]int64{}
 	}
 	r.bans = st.Bans
+	if backfilled > 0 {
+		r.saveStateLocked()
+	}
 	r.mu.Unlock()
 	if loaded == 0 {
 		r.warnStateLossSuspected()
@@ -200,7 +235,8 @@ func (r *Relay) loadState() error {
 }
 
 // warnStateLossSuspected 无会话加载且溯源目录留有活动痕迹时打运维告警：会话与封禁状态
-// 全量持久化（终态记录不删除），运行过的中继重启后应带有历史会话；空状态 + 非空溯源目录
+// 全量持久化（终态行保留一个剪枝保留期后删除），运行过的中继重启后应带有近期历史会话；
+// 空状态 + 非空溯源目录
 // 通常意味着 stateFile 配置指错或状态文件被移动——此窗口内 bind 会被答 not_found，
 // 分享方可能据此判死。仅告警，不阻断启动。
 func (r *Relay) warnStateLossSuspected() {

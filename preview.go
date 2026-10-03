@@ -240,13 +240,14 @@ func (r *Relay) adminBan(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	r.mu.Lock()
-	now := time.Now().UnixMilli()
+	nowT := time.Now()
+	now := nowT.UnixMilli()
 	var victims []string
 	if body.InstanceID != "" {
 		r.bans.Instances[body.InstanceID] = now
 		for tok, s := range r.sessions {
 			if s.InstanceID == body.InstanceID && s.Status == SessionActive {
-				s.Status = SessionRevoked
+				s.markEnded(SessionRevoked, nowT)
 				victims = append(victims, tok)
 			}
 		}
@@ -255,7 +256,7 @@ func (r *Relay) adminBan(w http.ResponseWriter, req *http.Request) {
 		r.bans.IPs[body.IP] = now
 		for tok, s := range r.sessions {
 			if s.RegIP == body.IP && s.Status == SessionActive {
-				s.Status = SessionRevoked
+				s.markEnded(SessionRevoked, nowT)
 				victims = append(victims, tok)
 			}
 		}

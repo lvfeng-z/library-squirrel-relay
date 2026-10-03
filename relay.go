@@ -18,7 +18,7 @@ type Relay struct {
 	trace *traceLog
 
 	mu       sync.Mutex
-	sessions map[string]*Session // token → 会话（含终态行，供撤销/过期语义与溯源）
+	sessions map[string]*Session // token → 会话（含终态行，供撤销/过期语义与溯源；终态行超保留期由 sweepOnce 剪枝）
 	tunnels  map[string]*tunnel  // token → 活动隧道（分享方在线时存在）
 	bans     banList
 
@@ -139,7 +139,7 @@ func (r *Relay) handleRegister(conn net.Conn, h helloPayload, ip string) {
 	}
 	expiresAt, err := resolveExpireMS(h.ExpireSeconds, r.cfg, time.Now())
 	if err != nil {
-		reject("malformed", err.Error())
+		reject("invalid_expire", err.Error())
 		return
 	}
 
@@ -228,7 +228,7 @@ func (r *Relay) handleBind(conn net.Conn, h helloPayload, ip string) {
 	}
 	// 惰性过期：绑定时即判定，保持撤销/过期语义在重启后依然精确
 	if s.Status == SessionActive && s.expired(time.Now()) {
-		s.Status = SessionExpired
+		s.markEnded(SessionExpired, time.Now())
 		r.saveStateLocked()
 		r.mu.Unlock()
 		r.killSession(h.Token, SessionExpired, keepNone)
@@ -284,7 +284,7 @@ func (r *Relay) checkDialAccess(token, instanceID, ip, passwordHash string) (*Se
 		return nil, nil, wireErr{"not_found", "分享不存在"}
 	}
 	if s.Status == SessionActive && s.expired(time.Now()) {
-		s.Status = SessionExpired
+		s.markEnded(SessionExpired, time.Now())
 		r.saveStateLocked()
 		r.trace.record("expire", token, s.InstanceID, "", "拨号惰性判定")
 		if t := r.tunnels[token]; t != nil {
@@ -374,9 +374,7 @@ func (r *Relay) killSession(token, newStatus string, keepTunnel *tunnel) *Sessio
 	r.mu.Lock()
 	if cur, ok := r.sessions[token]; ok {
 		s = cur
-		if s.Status == SessionActive {
-			s.Status = newStatus
-		}
+		s.markEnded(newStatus, time.Now())
 	}
 	if t, ok := r.tunnels[token]; ok {
 		delete(r.tunnels, token)
@@ -444,7 +442,7 @@ func (r *Relay) reportSession(token, reporterIP string) string {
 		return "not_found"
 	}
 	if s.Status == SessionActive {
-		s.Status = SessionRevoked
+		s.markEnded(SessionRevoked, now)
 		s.ReportCount++
 	}
 	var cascade []string
@@ -456,7 +454,7 @@ func (r *Relay) reportSession(token, reporterIP string) string {
 		}
 		for tok2, s2 := range r.sessions {
 			if s2.InstanceID == s.InstanceID && s2.Status == SessionActive {
-				s2.Status = SessionRevoked
+				s2.markEnded(SessionRevoked, now)
 				cascade = append(cascade, tok2)
 			}
 		}
@@ -512,7 +510,8 @@ func (r *Relay) sweepLoop(ctx context.Context) {
 	}
 }
 
-// sweepOnce 单轮扫描：把到有效期终点的活跃会话置为过期并拆隧道（在途流一并断开）
+// sweepOnce 单轮扫描：把到有效期终点的活跃会话置为过期并拆隧道（在途流一并断开）；
+// 终态行距终态时刻超过剪枝保留期后从注册表删除（防状态文件无限膨胀），删除与过期同轮落盘。
 func (r *Relay) sweepOnce(now time.Time) {
 	type victim struct {
 		token      string
@@ -520,16 +519,21 @@ func (r *Relay) sweepOnce(now time.Time) {
 		tun        *tunnel
 	}
 	var victims []victim
+	pruned := 0
 	r.mu.Lock()
 	for tok, s := range r.sessions {
 		if s.Status == SessionActive && s.expired(now) {
-			s.Status = SessionExpired
+			s.markEnded(SessionExpired, now)
 			t := r.tunnels[tok]
 			delete(r.tunnels, tok)
 			victims = append(victims, victim{tok, s.InstanceID, t})
 		}
+		if s.prunable(now) {
+			delete(r.sessions, tok)
+			pruned++
+		}
 	}
-	if len(victims) > 0 {
+	if len(victims) > 0 || pruned > 0 {
 		r.saveStateLocked()
 	}
 	r.mu.Unlock()
@@ -539,6 +543,9 @@ func (r *Relay) sweepOnce(now time.Time) {
 		}
 		r.trace.record("expire", v.token, v.instanceID, "", "定时扫描")
 		slog.Info("会话到期失效", "token", v.token)
+	}
+	if pruned > 0 {
+		slog.Info("终态会话超保留期剪枝", "count", pruned, "retention", sessionRetention)
 	}
 }
 
@@ -554,7 +561,7 @@ func (r *Relay) sessionForPage(token string) *Session {
 		return nil
 	}
 	if s.Status == SessionActive && s.expired(time.Now()) {
-		s.Status = SessionExpired
+		s.markEnded(SessionExpired, time.Now())
 		r.saveStateLocked()
 		if t := r.tunnels[token]; t != nil {
 			delete(r.tunnels, token)

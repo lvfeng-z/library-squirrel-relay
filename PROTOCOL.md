@@ -64,7 +64,8 @@ JSON、UTF-8，上限 `maxHelloBytes`（默认 4096）。**字段集封闭**：�
   "instanceId": "…",                     // 设备绑定实例 ID，客户端自报；[A-Za-z0-9-]{8,128}
   "passwordHash": "…",                   // 可选；hex(sha256(访问密码))，64 位小写 hex；
                                          // 明文密码永不在线路上出现
-  "expireSeconds": 604800,               // 仅 register：省略=中继默认(7天)；0=无限期；>0=自定义秒数
+  "expireSeconds": 2592000,              // 仅 register：省略=中继默认(30天)；0=已停用（拒绝注册，
+                                         // 回 invalid_expire）；>0=自定义秒数（超 maxExpireSeconds 截断）
   "meta": {                              // 仅 register：落地页文字元数据（无任何图像字段）
     "title": "…",                        // ≤200 字符、无控制字符
     "workCount": 3,                      // 0..1e9
@@ -100,7 +101,8 @@ JSON、UTF-8，上限 `maxHelloBytes`（默认 4096）。**字段集封闭**：�
 
 ```jsonc
 // WELCOME（register 应答）
-{ "token": "22 字符 base64url", "expiresAt": 1756000000000 }  // expiresAt unix 毫秒，0=无限期
+{ "token": "22 字符 base64url", "expiresAt": 1756000000000 }  // expiresAt unix 毫秒；新会话恒 >0
+                                                               // （0 仅遗留状态文件中的存量会话，见 §7.1）
 // WELCOME（bind 应答）
 { "expiresAt": 1756000000000 }
 // WELCOME（dial 应答）
@@ -117,6 +119,7 @@ JSON、UTF-8，上限 `maxHelloBytes`（默认 4096）。**字段集封闭**：�
 | malformed     | 输入非法（帧/JSON/字段/超长/未知字段）  | 一切输入校验失败           |
 | not_found     | token 不在中继**当前状态**中（只陈述「此刻没有」，**不承诺永久不存在**——状态文件损坏旁路、`stateFile` 配置指错的重启窗口内，持久化仍在的会话也以此码作答，恢复正确配置重启后回归） | 拨号/重绑未知 token        |
 | expired       | 会话已过有效期（kill-switch 已触发）    | 拨号/重绑过期会话          |
+| invalid_expire | 注册有效期字段非法（`expireSeconds`=0 已停用 / 负数） | register 显式指定 0 或负数 |
 | revoked       | 会话已被撤销（分享方/举报/管理端）      | 拨号/重绑已撤销会话        |
 | bad_password  | 访问密码缺失或错误                      | 拨号密码校验失败           |
 | banned        | 实例或 IP 在封禁名单                    | 注册/拨号/重绑             |
@@ -138,7 +141,7 @@ JSON、UTF-8，上限 `maxHelloBytes`（默认 4096）。**字段集封闭**：�
 
 | 方法/路径                 | 说明                                                              |
 |---------------------------|-------------------------------------------------------------------|
-| `GET /s/{token}`          | 落地页：仅文字元数据（标题/作品数/来源/作品名列表/时间/有效期）+「打开应用」+「举报」+ 合规文案（服务条款/免责声明、隐私声明、举报与处置流程、AGPL 源码获取）；无任何图像；分享方离线仍可访问；未知 token 返回 404 页 |
+| `GET /s/{token}`          | 落地页：仅文字元数据（标题/作品数/来源/作品名列表/时间/有效期——`expiresAt=0` 的遗留存量会话展示「长期有效」，见 §7.1）+「打开应用」+「举报」+ 合规文案（服务条款/免责声明、隐私声明、举报与处置流程、AGPL 源码获取）；无任何图像；分享方离线仍可访问；未知 token 返回 404 页 |
 | `POST /s/{token}/report`  | 举报：**立即撤销该会话**（即时生效）；同实例累计 `autoBanReportThreshold`（默认 3）次被举报自动封禁该实例；限流每 IP 每小时 `reportPerIPPerHour`=10（超限 429） |
 | `GET /healthz`            | 健康检查                                                          |
 | `POST /admin/kill`        | 管理端终止会话 `{"token":"…"}`                                     |
@@ -156,17 +159,22 @@ JSON、UTF-8，上限 `maxHelloBytes`（默认 4096）。**字段集封闭**：�
 ## 7. 会话与访问控制模型
 
 - **token**：中继生成，16 字节 crypto/rand → base64url 无填充，22 字符（`[A-Za-z0-9_-]`），128 bit 熵，不可猜测；URL 安全。token 即访问凭证（含隧道重绑权）。
-- **有效期**：注册时省略 → `defaultExpireSeconds`（默认 7 天）；`expireSeconds: 0` → 无限期；`>0` → 自定义（超过 `maxExpireSeconds` 截断，0=不设上限）。语义是**分享方显式失效控制**（到点中继显式拒绝并断开在途流，kill-switch 定时器扫描 + 拨号/落地页惰性判定），**非可用性承诺**——分享方离线链接即断。
+- **有效期**：注册时省略 → `defaultExpireSeconds`（默认 30 天；该配置**须为正数，配置为 0 或负数直接拒绝启动**）；`expireSeconds: 0` → **已停用**，注册即拒并回 `invalid_expire`（负数同样拒绝）；`>0` → 自定义秒数（超过 `maxExpireSeconds`（默认 30 天）截断，`maxExpireSeconds: 0`=不设上限）。**新注册的会话恒有到期时刻**，协议面不存在新建的无限期会话（`expiresAt=0` 仅遗留状态文件中的存量会话，见 §7.1）。语义是**分享方显式失效控制**（到点中继显式拒绝并断开在途流，kill-switch 定时器扫描 + 拨号/落地页惰性判定），**非可用性承诺**——分享方离线链接即断。
 - **撤销**：分享方 REVOKE 帧 / 落地页举报 / 管理端 kill，三者等价——会话立即终止、在途流断开、终态不可逆（重绑亦被拒）。
 - **流量上限**：`maxSessionTrafficBytes`（默认 64 GiB，0=不限）按双向 DATA 负载累计，超限即断流并拒绝后续拨号（`limit`）；计数在内存中，中继重启后重新累计。
 - **并发上限**：单会话并发流 `maxStreamsPerSession`（默认 8）、全局并发流 `maxGlobalStreams`（默认 512）、全局连接数 `maxConns`（默认 2048，线协议+HTTP 合计）、活跃会话数 `maxSessions`（默认 1000）。
 - **候选地址（V2 预留）**：`candidateAddrs` 注册时登记、随会话持久化，本期协议不消费——V2 直连升级只翻偏好序，不改本契约其他部分。
 
+### 7.1 会话生命周期与状态文件
+
+- **终态行保留 30 天后剪枝**：终态（`revoked`/`expired`）不可逆，保留期内仍参与处置与溯源；自终态时刻起满 30 天（`sessionRetention`）后，由定时扫描 `sweepOnce`（`sweepIntervalSec`，默认 10s）在同一轮里把该行从注册表删除，并把删除后的状态**即时原子落盘**——`state.json` 不随历史会话无限膨胀。活跃行永不剪枝。
+- **`endedAt` 字段语义**：会话记录含 `endedAt`（unix 毫秒 = **终态时刻**，是终态行剪枝保留期的计时起点；活跃行缺省不出现，JSON 标签 `endedAt,omitempty`）。终态写入点收敛到唯一入口 `markEnded`——撤销（REVOKE/举报/管理端 kill）与过期（定时扫描）都在同一处置里置 `status` 并盖 `endedAt`；幂等，已终态的行不重盖（以首个终态时刻为准）。状态文件版本维持 `1`；**旧文件中终态行缺 `endedAt`** 时，`loadState` 在加载时补记加载时刻为 `endedAt` 并**即时落盘**（自此宽限一个保留期，避免频繁重启反复重置宽限钟）。同一兼容路径也覆盖此前语义产生的 `expiresAt=0` 存量会话：它们是活跃行，既不到期也不剪枝，落地页沿用旧展示（`expiresAt=0` → 「长期有效」），直至被撤销——此后按终态行规则计时剪枝。
+
 ## 8. 溯源与合规
 
 - **溯源日志**（JSONL，按日切文件于 `traceDir`，默认留存 183 天——超期文件由启动清理与每小时定时清理删除，落地页隐私声明展示实际配置值）：`{ts, event, token, instanceId, ip, detail}`。事件含 register/bind/dial/dial_rejected/revoke/report/expire/ban/unban/traffic_limited/tunnel_down。**永不记录内容字节**。
 - **封禁**：按实例 ID 与 IP 两维；落地页举报累计达阈值自动封禁实例；管理端可手动封禁/解封（即时生效，级联撤销活跃会话）。
-- **终态会话保留**：撤销/过期会话记录不删除（处置与溯源连续性），状态文件随会话增长属预期（见「遗留」）。
+- **终态会话保留**：撤销/过期会话记录在终态时刻起保留 30 天再剪枝（见 §7.1），不再永久保留；保留期内处置与溯源连续性不受影响。
 
 ## 9. 配置参考
 
@@ -182,8 +190,8 @@ JSON、UTF-8，上限 `maxHelloBytes`（默认 4096）。**字段集封闭**：�
   "stateFile": "state.json",           // 会话+封禁状态持久化（原子写）
   "traceDir": "log",                   // 溯源日志目录
   "traceRetentionDays": 183,
-  "defaultExpireSeconds": 604800,      // 7 天
-  "maxExpireSeconds": 0,               // 0=不限
+  "defaultExpireSeconds": 2592000,     // 30 天；须为正数（0/负数拒绝启动）
+  "maxExpireSeconds": 2592000,         // 自定义有效期上限（30 天）；0=不设上限
   "maxSessions": 1000,
   "maxStreamsPerSession": 8,
   "maxGlobalStreams": 512,

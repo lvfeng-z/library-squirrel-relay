@@ -54,7 +54,7 @@ type Config struct {
 	TrustProxyHeaders bool `json:"trustProxyHeaders"` // 信任 X-Forwarded-For（经反向代理部署时开启）
 }
 
-// defaultConfig 默认配置（有效期默认 7 天；溯源日志留存 183 天 ≈ 6 个月）
+// defaultConfig 默认配置（有效期默认与上限均为 30 天；溯源日志留存 183 天 ≈ 6 个月）
 func defaultConfig() Config {
 	return Config{
 		ListenAddr:                "0.0.0.0:9527",
@@ -62,8 +62,8 @@ func defaultConfig() Config {
 		StateFile:                 "state.json",
 		TraceDir:                  "log",
 		TraceRetentionDays:        183,
-		DefaultExpireSeconds:      7 * 24 * 3600,
-		MaxExpireSeconds:          0,
+		DefaultExpireSeconds:      30 * 24 * 3600,
+		MaxExpireSeconds:          30 * 24 * 3600,
 		MaxSessions:               1000,
 		MaxStreamsPerSession:      8,
 		MaxGlobalStreams:          512,
@@ -104,6 +104,9 @@ func loadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("解析配置文件 %s: %w", path, err)
 	}
 	cfg.sanitize()
+	if err := cfg.validate(); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
@@ -130,12 +133,19 @@ func (c *Config) sanitize() {
 	floor(&c.RecipientIdleTimeoutSec, 1)
 	floor(&c.SniffTimeoutSec, 1)
 	floor(&c.SweepIntervalSec, 1)
-	if c.DefaultExpireSeconds < 0 {
-		c.DefaultExpireSeconds = 0
-	}
 	if c.TraceRetentionDays < 1 {
 		c.TraceRetentionDays = 1
 	}
+}
+
+// validate 显式误配校验：此类配置不做兜底修正，直接报错拒绝启动。
+// defaultExpireSeconds 非正 = 配置侧逃生口——注册未指定有效期（nil）将产生不到期会话，
+// 违背「取消无限期」定案（resolveExpireMS 已拒绝显式 0，此处收口默认值侧）。
+func (c Config) validate() error {
+	if c.DefaultExpireSeconds <= 0 {
+		return fmt.Errorf("defaultExpireSeconds 须为正数（无限期已停用）")
+	}
+	return nil
 }
 
 // 各超时的 time.Duration 换算
