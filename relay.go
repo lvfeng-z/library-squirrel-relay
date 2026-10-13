@@ -162,7 +162,7 @@ func (r *Relay) handleRegister(conn net.Conn, h helloPayload, ip string) {
 	}
 	// 生成不与任何在册 token 冲突的新 token（含终态行，防复活歧义）
 	var token string
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		cand, err := newToken()
 		if err != nil {
 			break

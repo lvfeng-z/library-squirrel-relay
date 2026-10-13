@@ -27,7 +27,7 @@ func TestTokenUnguessable(t *testing.T) {
 	for i := range posChars {
 		posChars[i] = map[rune]bool{}
 	}
-	for i := 0; i < n; i++ {
+	for range n {
 		tok, err := newToken()
 		if err != nil {
 			t.Fatalf("生成 token 失败: %v", err)
@@ -316,7 +316,7 @@ func TestRegisterRateLimit(t *testing.T) {
 func TestDialRateLimit(t *testing.T) {
 	h := startRelay(t, func(c *Config) { c.DialPerIPPerMinute = 3 })
 	A := startSharer(t, h.addr, regOpts{})
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		conn, code := dialRecipient(t, h.addr, A.token, "instance-recipient-01", "")
 		if code != "" {
 			t.Fatalf("限流内拨号被拒: %s", code)
@@ -339,7 +339,7 @@ func TestStreamConcurrencyLimit(t *testing.T) {
 			_ = c.Close()
 		}
 	}()
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		conn, code := dialRecipient(t, h.addr, A.token, "instance-recipient-01", "")
 		if code != "" {
 			t.Fatalf("并发内拨号被拒: %s", code)
@@ -532,7 +532,7 @@ func TestTraceLogRecordsFactsNotContent(t *testing.T) {
 		t.Error("溯源日志出现传输内容——违反「不记内容」红线")
 	}
 	// 每行均为合法 JSON 事件
-	for _, line := range strings.Split(strings.TrimSpace(all), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(all), "\n") {
 		if line == "" {
 			continue
 		}
@@ -554,12 +554,12 @@ func TestConcurrentRegistersAndDials(t *testing.T) {
 		c.DialPerIPPerMinute = 1000
 	})
 	var wg sync.WaitGroup
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			A := startSharer(t, h.addr, regOpts{instanceID: "instance-stress-" + string(rune('a'+i)) + "0001"})
-			for j := 0; j < 3; j++ {
+			for range 3 {
 				conn, code := dialRecipient(t, h.addr, A.token, "instance-recipient-01", "")
 				if code == "" {
 					_ = conn.Close()

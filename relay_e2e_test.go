@@ -48,7 +48,7 @@ func TestMultipleRecipientsConcurrent(t *testing.T) {
 	const n = 3
 	var wg sync.WaitGroup
 	errCh := make(chan error, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

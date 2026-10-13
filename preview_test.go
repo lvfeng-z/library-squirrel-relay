@@ -172,7 +172,7 @@ func TestLandingPageStates(t *testing.T) {
 func TestReportRateLimit(t *testing.T) {
 	h := startRelay(t, func(c *Config) { c.ReportPerIPPerHour = 2 })
 	A := startSharer(t, h.addr, regOpts{})
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if code, _ := httpPostJSON(t, "http://"+h.addr+"/s/"+A.token+"/report", "", nil); code != 200 {
 			t.Fatalf("限流内举报失败: %d", code)
 		}

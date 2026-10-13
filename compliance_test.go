@@ -52,7 +52,7 @@ func TestTraceLogFieldSetExcludesContent(t *testing.T) {
 		if strings.Contains(string(data), secret) {
 			t.Errorf("%s 出现传输明文负载", f)
 		}
-		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 			if line == "" {
 				continue
 			}

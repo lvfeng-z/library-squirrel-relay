@@ -500,12 +500,10 @@ func (p *recordingProxy) acceptLoop() {
 			_ = conn.Close()
 			continue
 		}
-		p.wg.Add(1)
-		go func() {
-			defer p.wg.Done()
+		p.wg.Go(func() {
 			go p.pump(conn, up)
 			p.pump(up, conn)
-		}()
+		})
 	}
 }
 

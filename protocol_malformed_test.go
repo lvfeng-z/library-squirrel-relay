@@ -128,7 +128,7 @@ func TestMalformedFramesRejected(t *testing.T) {
 	// 协议前缀 + 随机垃圾：一律断连
 	t.Run("随机垃圾字节", func(t *testing.T) {
 		rng := rand.New(rand.NewSource(42))
-		for i := 0; i < 20; i++ {
+		for i := range 20 {
 			conn := rawDial(t, h.addr)
 			garbage := make([]byte, 64)
 			_, _ = rng.Read(garbage)
